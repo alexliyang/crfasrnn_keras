@@ -73,6 +73,71 @@ class CrfRnnLayer(Layer):
         super(CrfRnnLayer, self).build(input_shape)
 
     def call(self, inputs):
+        unaries_array = tf.transpose(inputs[0], perm=(0, 3, 1, 2))
+        rgb_array = tf.transpose(inputs[1], perm=(0, 3, 1, 2))
+        c, h, w = self.num_classes, self.image_dims[0], self.image_dims[1]
+        all_ones = np.ones((c, h, w), dtype=np.float32)
+
+        def prepare_filter_norm_coefficients(rgb):
+            spatial_norm_vals = custom_module.high_dim_filter(
+                all_ones, rgb, bilateral=False, theta_gamma=self.theta_gamma)
+            bilateral_norm_vals = custom_module.high_dim_filter(
+                all_ones, rgb, bilateral=True, theta_alpha=self.theta_alpha,
+                theta_beta=self.theta_beta)
+            return (spatial_norm_vals, bilateral_norm_vals)
+        results = tf.map_fn(prepare_filter_norm_coefficients, rgb_array,
+                            dtype=(rgb_array.dtype, rgb_array.dtype),
+                            parallel_iterations=3)
+        # spatial_norm_vals_array = results[0]
+        # bilateral_norm_vals_array = results[1]
+
+        def calc_xxx(args):
+            q_values, rgb, spatial_norm_vals, bilateral_norm_vals = args
+            softmax_out = tf.nn.softmax(q_values, dim=0)
+            # Spatial filtering
+            spatial_out = custom_module.high_dim_filter(
+                softmax_out, rgb, bilateral=False,
+                theta_gamma=self.theta_gamma)
+            spatial_out = spatial_out / spatial_norm_vals
+
+            # Bilateral filtering
+            bilateral_out = custom_module.high_dim_filter(
+                softmax_out, rgb, bilateral=True,
+                theta_alpha=self.theta_alpha, theta_beta=self.theta_beta)
+            bilateral_out = bilateral_out / bilateral_norm_vals
+
+            # Weighting filter outputs
+            message_passing = (tf.matmul(self.spatial_ker_weights,
+                                         tf.reshape(spatial_out,
+                                                    (c, -1))) +
+                               tf.matmul(self.bilateral_ker_weights,
+                                         tf.reshape(bilateral_out,
+                                                    (c, -1))))
+
+            # Compatibility transform
+            pairwise = tf.matmul(self.compatibility_matrix,
+                                 message_passing)
+
+            # Adding unary potentials
+            pairwise = tf.reshape(pairwise, (c, h, w))
+            q_values = q_values - pairwise
+
+            return q_values
+
+        q_values_array = unaries_array
+        for i in range(self.num_iterations):
+            q_values_array = tf.map_fn(
+                calc_xxx, (q_values_array, rgb_array, results[0], results[1]),
+                dtype=q_values_array.dtype, parallel_iterations=3)
+
+        return tf.nn.sigmoid(
+            tf.transpose(
+                tf.reshape(q_values_array, (-1, c, h, w)),
+                perm=(0, 2, 3, 1)
+            )
+        )
+
+    def call_origin(self, inputs):
         unaries = tf.transpose(inputs[0][0, :, :, :], perm=(2, 0, 1))
         rgb = tf.transpose(inputs[1][0, :, :, :], perm=(2, 0, 1))
 
@@ -114,7 +179,8 @@ class CrfRnnLayer(Layer):
             pairwise = tf.reshape(pairwise, (c, h, w))
             q_values = unaries - pairwise
 
-        return tf.transpose(tf.reshape(q_values, (1, c, h, w)), perm=(0, 2, 3, 1))
+        return tf.transpose(
+                tf.reshape(q_values, (1, c, h, w)), perm=(0, 2, 3, 1))
 
     def compute_output_shape(self, input_shape):
         return input_shape

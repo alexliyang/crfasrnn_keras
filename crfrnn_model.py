@@ -22,9 +22,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
+import tensorflow as tf
+import keras
 from keras.models import Model
 from keras.layers import Conv2D, MaxPooling2D, Input, ZeroPadding2D, \
-    Dropout, Conv2DTranspose, Cropping2D, Add
+    Dropout, Conv2DTranspose, Cropping2D, Add, Concatenate
 from crfrnn_layer import CrfRnnLayer
 
 
@@ -111,6 +113,43 @@ def get_crfrnn_model_def():
                          name='crfrnn')([upscore, img_input])
 
     # Build the model
+    model = Model(img_input, output, name='crfrnn_net')
+
+    return model
+
+
+def get_crfrnn_model_def_v2():
+    channels, height, weight = 3, 500, 500
+
+    # Input
+    input_shape = (height, weight, 3)
+    img_input = Input(shape=input_shape)
+
+    c7 = Conv2D(
+        8, (7, 7), activation='relu', padding='same', name='conv7')(img_input)
+    c9 = Conv2D(
+        8, (9, 9), activation='relu', padding='same', name='conv9')(img_input)
+    c11 = Conv2D(
+        8, (11, 11), activation='relu', padding='same', name='conv11')(
+            img_input)
+    concat = Concatenate(axis=3)([c7, c9, c11])
+
+    outputs = Conv2D(1, (1, 1), padding='same', name='score-fr')(concat)
+
+    # upscore = Cropping2D(((31, 37), (31, 37)))(outputs)
+    upscore = outputs
+
+    output = CrfRnnLayer(image_dims=(height, weight),
+                         num_classes=1,
+                         theta_alpha=160.,
+                         theta_beta=3.,
+                         theta_gamma=3.,
+                         num_iterations=10,
+                         name='crfrnn')([upscore, img_input])
+
+    tf.summary.image('t', output)
+    tf.summary.merge_all()
+
     model = Model(img_input, output, name='crfrnn_net')
 
     return model
